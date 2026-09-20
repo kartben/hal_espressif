@@ -52,30 +52,48 @@ bool IRAM_ATTR esp_coex_common_env_is_chip_wrapper(void)
 #endif
 }
 
+/*
+ * The blob hands these a lock object of its own and expects them to serialise
+ * only what that object covers. irq_lock() is not that: under CONFIG_SMP it is
+ * z_smp_global_lock(), so every Wi-Fi critical section serialised BOTH cores
+ * and pinning the radio away from a control loop bought nothing -- the loop's
+ * core waited on the radio's lock anyway. Use a real spinlock per object, and
+ * keep the key in it: the lock itself serialises access to that field.
+ */
+struct coex_lock {
+    struct k_spinlock lock;
+    k_spinlock_key_t key;
+};
+
 void * esp_coex_common_spin_lock_create_wrapper(void)
 {
-    unsigned int *wifi_spin_lock = (unsigned int *)k_malloc(sizeof(unsigned int));
+    struct coex_lock *wifi_spin_lock = (struct coex_lock *)k_malloc(sizeof(*wifi_spin_lock));
 
     if (wifi_spin_lock == NULL) {
         LOG_ERR("spin_lock_create_wrapper allocation failed");
+        return NULL;
     }
+
+    memset(wifi_spin_lock, 0, sizeof(*wifi_spin_lock));
 
     return (void *)wifi_spin_lock;
 }
 
 uint32_t IRAM_ATTR esp_coex_common_int_disable_wrapper(void *wifi_int_mux)
 {
-    unsigned int *int_mux = (unsigned int *)wifi_int_mux;
+    struct coex_lock *l = (struct coex_lock *)wifi_int_mux;
 
-    *int_mux = irq_lock();
+    l->key = k_spin_lock(&l->lock);
     return 0;
 }
 
 void IRAM_ATTR esp_coex_common_int_restore_wrapper(void *wifi_int_mux, uint32_t tmp)
 {
-    unsigned int *key = (unsigned int *)wifi_int_mux;
+    struct coex_lock *l = (struct coex_lock *)wifi_int_mux;
 
-    irq_unlock(*key);
+    ARG_UNUSED(tmp);
+
+    k_spin_unlock(&l->lock, l->key);
 }
 
 void IRAM_ATTR esp_coex_common_task_yield_from_isr_wrapper(void)
