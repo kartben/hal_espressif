@@ -438,8 +438,6 @@ static uint32_t event_group_wait_bits_wrapper(void *event, uint32_t bits_to_wait
 
 static int32_t task_create_pinned_to_core_wrapper(void *task_func, const char *name, uint32_t stack_depth, void *param, uint32_t prio, void *task_handle, uint32_t core_id)
 {
-	ARG_UNUSED(core_id);
-
 	uint32_t stack_size = MAX(stack_depth, CONFIG_ESP32_WIFI_TASK_STACK_SIZE);
 	struct wifi_task *t = wifi_malloc(sizeof(*t));
 
@@ -463,11 +461,26 @@ static int32_t task_create_pinned_to_core_wrapper(void *task_func, const char *n
 		return 0;
 	}
 
+	/* The blob asks for a core because its tasks and their interrupts are
+	 * expected to share one; set_isr_wrapper() also enables the source on
+	 * whichever core is running, so a task that migrates can leave its own
+	 * interrupt masked on the core the matrix routes it to. Honour the
+	 * request: create suspended, pin, then start. */
 	k_tid_t tid = k_thread_create(&t->thread, t->stack, stack_size,
 				      (k_thread_entry_t)task_func, param, NULL, NULL,
-				      prio, K_INHERIT_PERMS, K_NO_WAIT);
+				      prio, K_INHERIT_PERMS,
+				      IS_ENABLED(CONFIG_SMP) ? K_FOREVER : K_NO_WAIT);
 
 	k_thread_name_set(tid, name);
+
+#if defined(CONFIG_SMP)
+#ifdef CONFIG_SCHED_CPU_MASK
+	if (core_id < (uint32_t)arch_num_cpus()) {
+		(void)k_thread_cpu_pin(tid, (int)core_id);
+	}
+#endif
+	k_thread_start(tid);
+#endif
 
 	*(int32_t *)task_handle = (int32_t)tid;
 	return 1;
